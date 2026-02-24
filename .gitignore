@@ -1,5 +1,10 @@
+# sccache for local
+/.cargo
+
 /target
 
+# vim
 *.swp
 *.un~
+
 todo.txt

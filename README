@@ -1,0 +1,127 @@
+--- Quickstart
+0. Install rustup
+1. Clone repository
+2. Create executable with cargo b --release
+3. Create $HOME/aup/root_dir.txt
+	It must contain 1 line - the root path to your music folder
+	Example: /Users/foobar/Music
+4. Run audio_player
+	There is 1 optional argument, the start directory, to begin playback immediately
+	Example: audio_player <START_DIR_ABSOLUTE_PATH>
+
+
+--- Keybinds
+While picking a song:
+Quit				Esc / q
+Select previous			k / Up
+Select next			j / Down
+Select first			g / Home
+Select last			G / End
+Switch to devices		l
+Switch to directories		Tab
+Pick song			Enter
+Try to reconnect current device	f
+Randomize song order		r
+Pause				p / Space / F8 / Pause
+Skip				s / F9
+Mute				m / F10
+Decrease volume			v / F11
+Increase volume			V / F12
+Seek backward 1 second		Left
+Seek forward 1 second		Right
+
+
+While picking a device:
+Quit				Esc / q
+Select previous			k / Up
+Select next			j / Down
+Select first			g / Home
+Select last			G / End
+Switch to song list		h
+Pick output device		Enter
+Try to reconnect current device	f
+Refresh devices			r
+Pause				p / Space / F8 / Pause
+Skip				s / F9
+Mute				m / F10
+Decrease volume			v / F11
+Increase volume			V / F12
+
+
+While picking a directory:
+Quit			Esc / q
+Switch to song list	Tab
+Select previous		Up / k
+Select next		Down / j
+Select first		g
+Select last		G
+Pick directory		Enter
+
+
+--- Notes
+If you pause playback and resume after a prolonged period of time,
+it is highly likely that the output stream for the output device will no longer be active.
+
+Use the keybind 'f' in song/device mode to force rebuilding the output stream for the current output device.
+Refreshing devices with 'r' and picking the same device with Enter will not work because the device is cached.
+
+Not all codecs and formats are enabled.
+If you want more codecs (adpcm, pcm, vorbis) or formats (aiff, caf, mkv, or wav) then you will need to:
+
+1. Edit Cargo.toml to add the relevant feature flags
+	Rodio feature flags (* = enabled)
+	* flac
+	* mp3
+	* mp4
+	* symphonia
+	* symphonia-ogg
+	* libopus
+	vorbis
+	wav
+
+	symphonia-adpcm
+	symphonia-aiff
+	symphonia-all
+	symphonia-caf
+	symphonia-mkv
+	symphonia-mp1
+	symphonia-mp2
+	symphonia-mp3
+	symphonia-mpa
+	claxon
+	hound
+	lewton
+	minimp3
+	wav_output
+
+	Symphonia feature flags (* = enabled)
+	all -> all-codecs, all-formats
+	all-codecs -> aac, adpcm, alac, flac, mp1, mp2, mp3, pcm, vorbis
+	all-formats -> aiff, caf, isomp4, mkv, ogg, wav
+
+	* aac -> symphonia-codec-aac
+	adpcm -> symphonia-codec-adpcm
+	* alac -> symphonia-codec-alac
+	* flac -> symphonia-bundle-flac
+	mp1 -> symphonia-bundle-mp3/mp1
+	mp2 -> symphonia-bundle-mp3/mp2
+	mp3 -> symphonia-bundle-mp3/mp3
+	* mpa -> mp1, mp2, mp3
+	pcm -> symphonia-codec-pcm
+	vorbis -> symphonia-codec-vorbis
+
+	* isomp4 -> symphonia-format-isomp4
+	* ogg -> symphonia-format-ogg
+	aiff -> symphonia-format-riff/aiff
+	caf -> symphonia-format-caf
+	mkv -> symphonia-format-mkv
+	wav -> symphonia-format-riff/wav
+
+
+2. Edit the source code
+	In the start_playback method of the SongsState struct,
+	call codec_registry.register_all() with the desired Decoder
+
+
+3. Build
+	cargo b --release

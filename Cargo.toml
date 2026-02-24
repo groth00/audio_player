@@ -4,5 +4,32 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cpal = "0.16.0"
-rodio = "0.21.1"
+crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "derive-more", "events"] }
+cpal = "0.17.3"
+ratatui = { version = "0.30.0", default-features = false, features = ["crossterm", "layout-cache", "macros", "underline-color"] }
+rodio = { path = "./rodio", default-features = false, features = ["flac", "mp3", "mp4", "symphonia", "symphonia-ogg", "libopus", "playback"] }
+rand = "0.10.0"
+symphonia-adapter-libopus = "0.2.6"
+symphonia = { version = "0.5.5" , default-features = false, features = ["flac", "aac", "alac", "mpa", "isomp4", "ogg"] }
+# default: adpcm, flac, mkv, ogg, pcm, vorbis, wav
+# adpcm -> symphonia-codec-adpcm
+# pcm -> symphonia-codec-pcm
+# vorbis -> symphonia-codec-vorbis
+# aac -> symphonia-codec-aac
+# alac -> symphonia-codec-alac
+# flac -> symphonia-bundle-flac
+# mp1 -> symphonia-bundle-mp3/mp1
+# mp2 -> symphonia-bundle-mp3/mp2
+# mp3 -> symphonia-bundle-mp3/mp3
+# mpa -> mp1, mp2, mp3
+
+# isomp4 -> symphonia-format-isomp4
+# mkv -> symphonia-format-mkv
+# ogg -> symphonia-format-ogg
+# wav -> symphonia-format-riff/wav
+# aiff -> symphonia-format-riff/aiff
+# caf -> symphonia-format-caf
+
+# all -> all-codecs, all-formats
+# all-codecs -> aac, adpcm, alac, flac, mp1, mp2, mp3, pcm, vorbis
+# all-formats -> aiff, caf, isomp4, mkv, ogg, wav
