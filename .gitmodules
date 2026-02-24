@@ -1,0 +1,3 @@
+[submodule "rodio"]
+	path = rodio
+	url = git@github.com:groth00/rodio.git
