@@ -1,18 +1,21 @@
 --- Quickstart
 0. Install rustup
 1. Clone repository
-2. Create executable with cargo b --release
-3. Create $HOME/aup/root_dir.txt
+2. Build executable with cargo b --release
+3. Create $HOME/.aup/root_dir.txt
 	It must contain 1 line - the root path to your music folder
-	Example: /Users/foobar/Music
-4. Run audio_player
-	There is 1 optional argument, the start directory, to begin playback immediately
-	Example: audio_player <START_DIR_ABSOLUTE_PATH>
+	Example: mkdir ~/.aup && echo "/home/donkey_kong/Music" > ~/.aup/root_dir.txt
+4. Run the program
+	a. Symlink it for easier access
+		Example: ln -s /wherever_you_cloned_to/target/release/audio_player /convenient_location/aup
+
+	b. There is 1 optional argument, the start directory, to begin playback immediately
+		Example: aup <START_DIR_ABSOLUTE_PATH>
 
 
 --- Keybinds
 While picking a song:
-Quit				Esc / q
+Quit				Esc
 Select previous			k / Up
 Select next			j / Down
 Select first			g / Home
@@ -20,42 +23,69 @@ Select last			G / End
 Switch to devices		l
 Switch to directories		Tab
 Pick song			Enter
-Try to reconnect current device	f
+Reconnect first output device	f
 Randomize song order		r
 Pause				p / Space / F8 / Pause
 Skip				s / F9
 Mute				m / F10
 Decrease volume			v / F11
 Increase volume			V / F12
+Loop song			L
 Seek backward 1 second		Left
 Seek forward 1 second		Right
 
 
 While picking a device:
-Quit				Esc / q
+Quit				Esc
 Select previous			k / Up
 Select next			j / Down
 Select first			g / Home
 Select last			G / End
 Switch to song list		h
+Switch to directories		Tab
 Pick output device		Enter
-Try to reconnect current device	f
+Reconnect first output device	f
 Refresh devices			r
 Pause				p / Space / F8 / Pause
 Skip				s / F9
 Mute				m / F10
 Decrease volume			v / F11
 Increase volume			V / F12
+Loop song			L
+Seek backward 1 second		Left
+Seek forward 1 second		Right
 
 
 While picking a directory:
-Quit			Esc / q
-Switch to song list	Tab
-Select previous		Up / k
-Select next		Down / j
-Select first		g
-Select last		G
-Pick directory		Enter
+Quit				Esc
+Switch to song list		Tab
+Filter directories		/
+Select previous			Up / k
+Select next			Down / j
+Select first			g / Home
+Select last			G / End
+Pick directory			Enter
+Randomize songs			r
+Pause				p / Space / F8 / Pause
+Skip				s / F9
+Mute				m / F10
+Decrease volume			v / F11
+Increase volume			V / F12
+Loop song			L
+Seek backward 1 second		Left
+Seek forward 1 second		Right
+
+
+While filtering directories:
+Quit			Esc
+Switch to directories	Tab
+Filter directories	Any character, Backspace
+Select previous		CTRL+k, Up
+Select next		CTRL+j, Down
+Select first		CTRL+f
+Select last		CTRL+l
+Select directory	Enter
+
 
 
 --- Notes

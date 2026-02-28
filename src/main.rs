@@ -20,7 +20,7 @@ use crossterm::event::{self, KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Flex, Layout, Rect},
-    prelude::{Color, Stylize},
+    prelude::{Color, Stylize, Text},
     style::{palette::tailwind::SLATE, Modifier, Style},
     text::Line,
     widgets::{
@@ -41,6 +41,18 @@ struct PlaybackPosition {
     total_duration: Option<Duration>,
     current_pos: Option<Duration>,
     volume: f32,
+    is_looping: bool,
+}
+
+impl Default for PlaybackPosition {
+    fn default() -> Self {
+        Self {
+            total_duration: None,
+            current_pos: None,
+            volume: 0.8,
+            is_looping: false,
+        }
+    }
 }
 
 enum Focus {
@@ -103,13 +115,14 @@ struct SongsState {
 
 impl SongsState {
     fn new(
+        main_tx: Sender<Msg2Sub>,
+        main_rx: Receiver<Msg2Sub>,
         initial_sources: Vec<MediaSource>,
         devices: AvailableDevices,
         initial_status: Status,
     ) -> Self {
         let starting_device = &devices.output_devices[0];
 
-        let (main_tx, main_rx): (Sender<Msg2Sub>, Receiver<Msg2Sub>) = mpsc::channel();
         let (sub_tx, sub_rx): (Sender<Msg2Main>, Receiver<Msg2Main>) = mpsc::channel();
         let playback_jh = match SongsState::start_playback(
             &starting_device,
@@ -127,11 +140,7 @@ impl SongsState {
 
         Self {
             playback_jh,
-            playback_position: PlaybackPosition {
-                total_duration: None,
-                current_pos: None,
-                volume: 0.8,
-            },
+            playback_position: PlaybackPosition::default(),
             main_tx,
             sub_rx,
             devices,
@@ -206,6 +215,7 @@ impl SongsState {
     fn read_channel(&mut self) {
         for msg in self.sub_rx.try_iter() {
             match msg {
+                Msg2Main::LoopStatus(is_looping) => self.playback_position.is_looping = is_looping,
                 Msg2Main::Panic(msg) => panic!("{}", msg),
                 Msg2Main::PanicS(msg) => panic!("{}", msg),
                 Msg2Main::OutputStreamInitializationFailed => {
@@ -220,23 +230,35 @@ impl SongsState {
                         .unwrap_or_default();
                 }
                 Msg2Main::DeviceLost => {
-                    if let Err(_) = self.send_devices() {
+                    if let Err(_) = self.send_devices(true) {
                         self.exit_reason = Some(ReasonStopped::NoOutputDevices);
                     }
                 }
-                Msg2Main::SongChanged(index) => {
-                    self.media
+                Msg2Main::DeviceLostWait => {
+                    if let Err(_) = self.send_devices(false) {
+                        self.exit_reason = Some(ReasonStopped::NoOutputDevices);
+                    }
+                }
+                Msg2Main::SongChanged(index) => match index {
+                    Some(song_index) => {
+                        self.media
+                            .sources
+                            .iter_mut()
+                            .enumerate()
+                            .for_each(|(i, s)| {
+                                if i == song_index {
+                                    s.is_playing = true;
+                                } else {
+                                    s.is_playing = false;
+                                }
+                            });
+                    }
+                    None => self
+                        .media
                         .sources
                         .iter_mut()
-                        .enumerate()
-                        .for_each(|(i, s)| {
-                            if index == i {
-                                s.is_playing = true;
-                            } else {
-                                s.is_playing = false;
-                            }
-                        });
-                }
+                        .for_each(|s| s.is_playing = false),
+                },
                 Msg2Main::Randomized(sources) => {
                     self.media.sources = sources
                         .into_iter()
@@ -259,7 +281,7 @@ impl SongsState {
     fn handle_key(&mut self, key: KeyEvent) {
         match self.focus {
             Focus::Songs => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.exit_reason = Some(ReasonStopped::Quit),
+                KeyCode::Esc => self.exit_reason = Some(ReasonStopped::Quit),
                 KeyCode::Up | KeyCode::Char('k') => self.media.state.select_previous(),
                 KeyCode::Down | KeyCode::Char('j') => self.media.state.select_next(),
                 KeyCode::Char('G') | KeyCode::Home => self.media.state.select_last(),
@@ -270,7 +292,7 @@ impl SongsState {
                 }
                 KeyCode::Tab => self.exit_reason = Some(ReasonStopped::ChangeScreen),
                 KeyCode::Char('f') => {
-                    if let Err(_) = self.send_devices() {
+                    if let Err(_) = self.send_devices(true) {
                         self.exit_reason = Some(ReasonStopped::NoOutputDevices);
                     }
                 }
@@ -295,6 +317,9 @@ impl SongsState {
                 KeyCode::Right => {
                     let _ = self.main_tx.send(Msg2Sub::MoveForward);
                 }
+                KeyCode::Char('L') => {
+                    let _ = self.main_tx.send(Msg2Sub::ToggleLoop);
+                }
                 KeyCode::Enter => {
                     if let Some(index) = &self.media.state.selected() {
                         let _ = self.main_tx.send(Msg2Sub::Select(*index));
@@ -303,14 +328,15 @@ impl SongsState {
                 _ => (),
             },
             Focus::Devices => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.exit_reason = Some(ReasonStopped::Quit),
+                KeyCode::Esc => self.exit_reason = Some(ReasonStopped::Quit),
+                KeyCode::Tab => self.exit_reason = Some(ReasonStopped::ChangeScreen),
                 KeyCode::Char('h') => self.focus = Focus::Songs,
                 KeyCode::Up | KeyCode::Char('k') => self.device_list_state.select_previous(),
                 KeyCode::Down | KeyCode::Char('j') => self.device_list_state.select_next(),
                 KeyCode::Char('g') | KeyCode::Home => self.device_list_state.select_first(),
                 KeyCode::Char('G') | KeyCode::End => self.device_list_state.select_last(),
                 KeyCode::Char('f') => {
-                    if let Err(_) = self.send_devices() {
+                    if let Err(_) = self.send_devices(true) {
                         self.exit_reason = Some(ReasonStopped::NoOutputDevices);
                     }
                 }
@@ -331,6 +357,15 @@ impl SongsState {
                     let _ = self.main_tx.send(Msg2Sub::IncreaseVolume);
                 }
                 KeyCode::Char('r') => self.refresh_devices(),
+                KeyCode::Left => {
+                    let _ = self.main_tx.send(Msg2Sub::MoveBackward);
+                }
+                KeyCode::Right => {
+                    let _ = self.main_tx.send(Msg2Sub::MoveForward);
+                }
+                KeyCode::Char('L') => {
+                    let _ = self.main_tx.send(Msg2Sub::ToggleLoop);
+                }
                 _ => (),
             },
         }
@@ -367,12 +402,14 @@ impl SongsState {
         }
     }
 
-    fn send_devices(&self) -> Result<(), AppError> {
+    fn send_devices(&self, start_playback: bool) -> Result<(), AppError> {
         let available_devices = SongsState::get_devices();
         if available_devices.is_empty() {
             return Err(AppError::NoOutputDevices);
         }
-        let _ = self.main_tx.send(Msg2Sub::Devices(available_devices));
+        let _ = self
+            .main_tx
+            .send(Msg2Sub::Devices(available_devices, start_playback));
         Ok(())
     }
 }
@@ -391,14 +428,10 @@ impl SongsState {
             .spacing(4);
         let [left, right] = area.layout(&main_layout);
 
-        let rhs_layout = Layout::vertical([
-            Constraint::Max(16),
-            Constraint::Max(1),
-            Constraint::Max(1),
-            Constraint::Max(1),
-        ])
-        .spacing(4);
-        let [r0, r1, r2, r3] = right.layout(&rhs_layout);
+        let rhs_layout =
+            Layout::vertical([Constraint::Max(16), Constraint::Max(3), Constraint::Max(1)])
+                .spacing(4);
+        let [r0, r1, r2] = right.layout(&rhs_layout);
 
         let block = Block::new().title(Line::raw("Songs").centered());
         let list_songs = List::new(self.media.sources.iter().map(|media_source| {
@@ -431,24 +464,31 @@ impl SongsState {
         .highlight_spacing(HighlightSpacing::Always);
         StatefulWidget::render(list_devices, r0, buf, &mut self.device_list_state);
 
-        let volume = format!("Volume: {}", (self.playback_position.volume * 10.0) as u8);
-        volume.render(r1, buf);
-
-        if let (Some(pos), Some(total_duration)) = (
+        let playback_info = match (
             self.playback_position.current_pos,
             self.playback_position.total_duration,
         ) {
-            let playback_info = format!(
+            (Some(pos), Some(total_duration)) => &format!(
                 "{:.3}/{:.3}",
                 pos.as_secs_f32(),
-                total_duration.as_secs_f32(),
-            );
-            playback_info.render(r2, buf);
-        }
+                total_duration.as_secs_f32()
+            ),
+            (Some(pos), None) => &format!("{:.3}/?", pos.as_secs_f32()),
+            (None, Some(total_duration)) => &format!("?/{:.3}", total_duration.as_secs_f32()),
+            (None, None) => "Unknown Playback Position",
+        };
+
+        let playback_text = Text::from(format!(
+            "Volume: {}\nLooping: {}\n{}",
+            (self.playback_position.volume * 10.0) as u8,
+            self.playback_position.is_looping,
+            playback_info,
+        ));
+        playback_text.render(r1, buf);
 
         if let Some((instant, msg)) = self.message {
             if Instant::now() - instant < Duration::from_millis(3000) {
-                msg.render(r3, buf);
+                msg.render(r2, buf);
             } else {
                 self.message = None;
             }
@@ -480,7 +520,9 @@ struct PlaybackState {
     volume: f32,
     position: Option<Duration>,
     last_position_update: Instant,
+    last_device_healthcheck: Instant,
     total_duration: Option<Duration>,
+    should_loop: bool,
 }
 
 impl PlaybackState {
@@ -508,7 +550,9 @@ impl PlaybackState {
             volume: 0.8,
             position: None,
             last_position_update: Instant::now(),
+            last_device_healthcheck: Instant::now(),
             total_duration: None,
+            should_loop: false,
         }
     }
 
@@ -531,7 +575,8 @@ impl PlaybackState {
         source
     }
 
-    fn _restore_state(&mut self, sink: Player) {
+    // does not start playback
+    fn _restore_state(&mut self, sink: &Player) {
         // restore previous settings
         sink.set_volume(self.volume);
 
@@ -544,34 +589,31 @@ impl PlaybackState {
         if let Some(pos) = self.position {
             let _ = sink.try_seek(pos);
         }
-
-        sink.play();
-
-        self.sink = sink;
-        self.status = Status::Playing;
     }
 
     // NOTE: if switching devices fails, it's a no-op (besides printing a message)
     // failure would likely occur if the device disconnected
     fn switch_device(&mut self, device: Device) {
-        if device.description() != self.current_device.description() {
-            match build_stream(device.clone(), self.sub_tx.clone()) {
-                Ok(stream) => {
-                    self.current_device = device.clone();
-                    self.stream_handle = stream;
-                    let mixer = self.stream_handle.mixer();
-                    let sink = Player::connect_new(&mixer);
-                    self._restore_state(sink);
-                    let _ = self.sub_tx.send(Msg2Main::DeviceSwitched(device.clone()));
-                }
-                Err(_e) => {
-                    let _ = self.sub_tx.send(Msg2Main::OutputStreamInitializationFailed);
-                }
+        match build_stream(device.clone(), self.sub_tx.clone()) {
+            Ok(stream) => {
+                self.current_device = device.clone();
+                self.stream_handle = stream;
+                let mixer = self.stream_handle.mixer();
+                let sink = Player::connect_new(&mixer);
+                self._restore_state(&sink);
+                sink.play();
+
+                self.sink = sink;
+                self.status = Status::Playing;
+                let _ = self.sub_tx.send(Msg2Main::DeviceSwitched(device.clone()));
+            }
+            Err(_e) => {
+                let _ = self.sub_tx.send(Msg2Main::OutputStreamInitializationFailed);
             }
         }
     }
 
-    fn rebuild_sink(&mut self, devices: AvailableDevices) {
+    fn rebuild_player_from_new_devices(&mut self, devices: AvailableDevices, start_playback: bool) {
         let mut stream = None;
         for device in devices.output_devices {
             match build_stream(device.clone(), self.sub_tx.clone()) {
@@ -596,26 +638,88 @@ impl PlaybackState {
                 panic!("failed to create sink for any output device");
             }
         };
-        self._restore_state(new_sink);
+        self._restore_state(&new_sink);
+
+        if start_playback {
+            new_sink.play();
+            self.status = Status::Playing;
+        }
+
+        self.sink = new_sink;
         let _ = self
             .sub_tx
             .send(Msg2Main::DeviceSwitched(self.current_device.clone()));
+    }
+
+    fn rebuild_player_from_current_device(&mut self) {
+        let stream = match build_stream(self.current_device.clone(), self.sub_tx.clone()) {
+            Ok(player) => player,
+            Err(_e) => {
+                let _ = self.sub_tx.send(Msg2Main::DeviceLostWait);
+                return;
+            }
+        };
+
+        self.stream_handle = stream;
+        let mixer = self.stream_handle.mixer();
+        let new_sink = Player::connect_new(&mixer);
+
+        match self.status {
+            Status::Paused => self._restore_state(&new_sink),
+            Status::Waiting => {
+                new_sink.set_volume(self.volume);
+                self.sink = new_sink;
+            }
+            _ => unreachable!(),
+        }
+
+        self.last_device_healthcheck = Instant::now();
+        let _ = self
+            .sub_tx
+            .send(Msg2Main::DeviceSwitched(self.current_device.clone()));
+    }
+
+    fn toggle_loop(&mut self) {
+        self.should_loop = !self.should_loop;
+        let _ = self.sub_tx.send(Msg2Main::LoopStatus(self.should_loop));
     }
 
     fn run(&mut self) -> Result<(), AppError> {
         loop {
             match self.status {
                 Status::Startup => {
+                    let _ = self.sub_tx.send(Msg2Main::SongChanged(Some(self.index)));
+
+                    self.add_next_source()?;
+                    self.sink.play();
+                    self.status = Status::Playing;
+                }
+                Status::NextSong => {
+                    if !self.should_loop {
+                        self.index += 1;
+                        if self.index >= self.sources.len() {
+                            self.index = 0;
+                            self.status = Status::Waiting;
+
+                            let _ = self.sub_tx.send(Msg2Main::SongChanged(None));
+                            continue;
+                        }
+
+                        let _ = self.sub_tx.send(Msg2Main::SongChanged(Some(self.index)));
+                    }
+
                     self.add_next_source()?;
                     self.sink.play();
                     self.status = Status::Playing;
                 }
                 Status::Playing => {
                     if self.sink.empty() {
-                        self.status = Status::FinishedSong;
+                        self.status = Status::NextSong;
+                        self.total_duration = None;
                         continue;
                     }
                     self.update_position();
+                    self.last_device_healthcheck = Instant::now();
                     match self.main_rx.try_recv() {
                         Ok(msg) => match msg {
                             Msg2Sub::PauseUnpause => self.pause_unpause(),
@@ -630,7 +734,10 @@ impl PlaybackState {
                             Msg2Sub::MoveBackward => self.try_move_backward(),
                             Msg2Sub::ShouldExit => self.status = Status::ShouldExit,
                             Msg2Sub::SwitchDevice(device) => self.switch_device(device),
-                            Msg2Sub::Devices(ds) => self.rebuild_sink(ds),
+                            Msg2Sub::Devices(ds, start_playback) => {
+                                self.rebuild_player_from_new_devices(ds, start_playback)
+                            }
+                            Msg2Sub::ToggleLoop => self.toggle_loop(),
                         },
                         Err(e) => match e {
                             TryRecvError::Empty => (),
@@ -639,19 +746,10 @@ impl PlaybackState {
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
-                Status::FinishedSong => {
-                    self.index += 1;
-                    if self.index >= self.sources.len() {
-                        self.status = Status::Waiting;
-                        continue;
-                    }
-                    let _ = self.sub_tx.send(Msg2Main::SongChanged(self.index));
-
-                    self.add_next_source()?;
-                    self.sink.play();
-                    self.status = Status::Playing;
-                }
                 Status::Paused => {
+                    if Instant::now() - self.last_device_healthcheck > Duration::from_secs(60) {
+                        self.rebuild_player_from_current_device();
+                    }
                     match self.main_rx.try_recv() {
                         Ok(msg) => match msg {
                             Msg2Sub::PauseUnpause => self.pause_unpause(),
@@ -665,7 +763,10 @@ impl PlaybackState {
                             Msg2Sub::MoveForward | Msg2Sub::MoveBackward => (),
                             Msg2Sub::ShouldExit => self.status = Status::ShouldExit,
                             Msg2Sub::SwitchDevice(device) => self.switch_device(device),
-                            Msg2Sub::Devices(ds) => self.rebuild_sink(ds),
+                            Msg2Sub::Devices(ds, start_playback) => {
+                                self.rebuild_player_from_new_devices(ds, start_playback)
+                            }
+                            Msg2Sub::ToggleLoop => self.toggle_loop(),
                         },
                         Err(e) => match e {
                             TryRecvError::Empty => (),
@@ -674,29 +775,35 @@ impl PlaybackState {
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
-                Status::Changed => {
-                    self.add_next_source()?;
-                    self.sink.play();
-                    self.status = Status::Playing;
-                    let _ = self.sub_tx.send(Msg2Main::SongChanged(self.index));
+                // reached end of the sources
+                Status::Waiting => {
+                    if Instant::now() - self.last_device_healthcheck > Duration::from_secs(60) {
+                        self.rebuild_player_from_current_device();
+                    }
+                    match self.main_rx.try_recv() {
+                        Ok(msg) => match msg {
+                            Msg2Sub::PauseUnpause | Msg2Sub::Skip => (),
+                            Msg2Sub::Select(index) => self.select_source(index),
+                            Msg2Sub::DecreaseVolume => self.decrease_volume(),
+                            Msg2Sub::IncreaseVolume => self.increase_volume(),
+                            Msg2Sub::Mute => self.mute(),
+                            Msg2Sub::NewSources(new_sources) => self.new_sources(new_sources),
+                            Msg2Sub::Randomize => self.randomize_sources(),
+                            Msg2Sub::MoveForward | Msg2Sub::MoveBackward => (),
+                            Msg2Sub::ShouldExit => self.status = Status::ShouldExit,
+                            Msg2Sub::SwitchDevice(device) => self.switch_device(device),
+                            Msg2Sub::Devices(ds, start_playback) => {
+                                self.rebuild_player_from_new_devices(ds, start_playback)
+                            }
+                            Msg2Sub::ToggleLoop => self.toggle_loop(),
+                        },
+                        Err(e) => match e {
+                            TryRecvError::Empty => (),
+                            TryRecvError::Disconnected => break,
+                        },
+                    }
+                    thread::sleep(Duration::from_millis(50));
                 }
-                Status::Waiting => match self.main_rx.recv() {
-                    // reached end of the sources; block until next message
-                    Ok(msg) => match msg {
-                        Msg2Sub::PauseUnpause | Msg2Sub::Skip => (),
-                        Msg2Sub::Select(index) => self.select_source(index),
-                        Msg2Sub::DecreaseVolume => self.decrease_volume(),
-                        Msg2Sub::IncreaseVolume => self.increase_volume(),
-                        Msg2Sub::Mute => self.mute(),
-                        Msg2Sub::NewSources(new_sources) => self.new_sources(new_sources),
-                        Msg2Sub::Randomize => self.randomize_sources(),
-                        Msg2Sub::MoveForward | Msg2Sub::MoveBackward => (),
-                        Msg2Sub::ShouldExit => self.status = Status::ShouldExit,
-                        Msg2Sub::SwitchDevice(device) => self.switch_device(device),
-                        Msg2Sub::Devices(ds) => self.rebuild_sink(ds),
-                    },
-                    Err(_) => break,
-                },
                 Status::ShouldExit => break,
             }
         }
@@ -741,7 +848,12 @@ impl PlaybackState {
     fn select_source(&mut self, index: usize) {
         self.sink.clear();
         self.index = index;
-        self.status = Status::Changed;
+        self.status = Status::Startup;
+    }
+
+    fn skip(&mut self) {
+        self.sink.clear();
+        self.status = Status::NextSong;
     }
 
     fn new_sources(&mut self, new_sources: Vec<PathBuf>) {
@@ -770,12 +882,6 @@ impl PlaybackState {
             self.sink.pause();
             self.status = Status::Paused;
         }
-    }
-
-    fn skip(&mut self) {
-        self.sink.clear();
-        self.index += 1;
-        self.status = Status::Changed;
     }
 
     fn randomize_sources(&mut self) {
@@ -820,24 +926,70 @@ fn build_stream(device: Device, tx: Sender<Msg2Main>) -> Result<MixerDeviceSink,
     Ok(stream)
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum DirectoryFocus {
+    #[default]
+    View,
+    Textedit,
+}
+
+struct Debounce {
+    last_trigger: Option<Instant>,
+    delay: Duration,
+}
+
+impl Debounce {
+    fn trigger(&mut self) {
+        self.last_trigger = Some(Instant::now());
+    }
+
+    fn ready(&self) -> bool {
+        if let Some(ts) = self.last_trigger {
+            Instant::now() - ts > self.delay
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for Debounce {
+    fn default() -> Self {
+        Self {
+            last_trigger: None,
+            delay: Duration::from_millis(100),
+        }
+    }
+}
+
 struct DirectoryState {
+    main_tx: Sender<Msg2Sub>,
     root_dir: String,
-    // textedit: String,
+    textedit: String,
     items: DirItems,
+    filtered_items: DirItems,
     contents: HashMap<PathBuf, Vec<String>>,
+    focus: DirectoryFocus,
+    debounce: Debounce,
     exit_reason: Option<ReasonStopped>,
 }
 
 impl DirectoryState {
-    fn new(args: &Args) -> Self {
+    fn new(main_tx: Sender<Msg2Sub>, root_dir: &str) -> Self {
         let mut state = Self {
-            root_dir: args.root_dir.clone(),
-            // textedit: String::with_capacity(32),
+            main_tx,
+            root_dir: root_dir.to_owned(),
+            textedit: String::with_capacity(32),
             items: DirItems {
-                dirs: Vec::with_capacity(64),
+                dirs: Vec::with_capacity(128),
+                state: ListState::default(),
+            },
+            filtered_items: DirItems {
+                dirs: Vec::with_capacity(128),
                 state: ListState::default(),
             },
             contents: HashMap::new(),
+            focus: DirectoryFocus::default(),
+            debounce: Debounce::default(),
             exit_reason: None,
         };
         state.update_candidates();
@@ -845,19 +997,84 @@ impl DirectoryState {
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
-        match event.code {
-            KeyCode::Up | KeyCode::Char('k') => self.items.state.select_previous(),
-            KeyCode::Down | KeyCode::Char('j') => self.items.state.select_next(),
-            KeyCode::Char('g') => self.items.state.select_first(),
-            KeyCode::Char('G') => self.items.state.select_last(),
-            KeyCode::Esc | KeyCode::Char('q') => self.exit_reason = Some(ReasonStopped::Quit),
-            KeyCode::Tab => self.exit_reason = Some(ReasonStopped::ChangeScreen),
-            KeyCode::Enter => self.exit_reason = Some(ReasonStopped::NewSources),
-            // TODO: show textedit, add focus enum to handle key presses in states
-            // add debounce and show results
-            KeyCode::Char('/') => (),
-            _ => (),
+        match self.focus {
+            DirectoryFocus::View => match event.code {
+                KeyCode::Esc => self.exit_reason = Some(ReasonStopped::Quit),
+                KeyCode::Tab => self.exit_reason = Some(ReasonStopped::ChangeScreen),
+                KeyCode::Char('/') => self.focus = DirectoryFocus::Textedit,
+                KeyCode::Up | KeyCode::Char('k') => self.items.state.select_previous(),
+                KeyCode::Down | KeyCode::Char('j') => self.items.state.select_next(),
+                KeyCode::Char('g') | KeyCode::Home => self.items.state.select_first(),
+                KeyCode::Char('G') | KeyCode::End => self.items.state.select_last(),
+                KeyCode::Enter => self.exit_reason = Some(ReasonStopped::NewSources),
+                KeyCode::Char('p') | KeyCode::F(8) | KeyCode::Pause | KeyCode::Char(' ') => {
+                    let _ = self.main_tx.send(Msg2Sub::PauseUnpause);
+                }
+                KeyCode::Char('r') => {
+                    let _ = self.main_tx.send(Msg2Sub::Randomize);
+                }
+                KeyCode::Char('s') | KeyCode::F(9) => {
+                    let _ = self.main_tx.send(Msg2Sub::Skip);
+                }
+                KeyCode::Char('m') | KeyCode::F(10) => {
+                    let _ = self.main_tx.send(Msg2Sub::Mute);
+                }
+                KeyCode::Char('v') | KeyCode::F(11) => {
+                    let _ = self.main_tx.send(Msg2Sub::DecreaseVolume);
+                }
+                KeyCode::Char('V') | KeyCode::F(12) => {
+                    let _ = self.main_tx.send(Msg2Sub::IncreaseVolume);
+                }
+                KeyCode::Left => {
+                    let _ = self.main_tx.send(Msg2Sub::MoveBackward);
+                }
+                KeyCode::Right => {
+                    let _ = self.main_tx.send(Msg2Sub::MoveForward);
+                }
+                KeyCode::Char('L') => {
+                    let _ = self.main_tx.send(Msg2Sub::ToggleLoop);
+                }
+                _ => (),
+            },
+            DirectoryFocus::Textedit => match event.code {
+                KeyCode::Esc => self.exit_reason = Some(ReasonStopped::Quit),
+                KeyCode::Tab => self.focus = DirectoryFocus::View,
+                KeyCode::Char(c) if event.modifiers == crossterm::event::KeyModifiers::NONE => {
+                    self.textedit.push(c);
+                    self.debounce.trigger();
+                }
+                KeyCode::Backspace => {
+                    self.textedit.pop();
+                    self.debounce.trigger();
+                }
+                KeyCode::Char(c) if event.modifiers == crossterm::event::KeyModifiers::CONTROL => {
+                    match c {
+                        'j' => self.filtered_items.state.select_next(),
+                        'k' => self.filtered_items.state.select_previous(),
+                        'f' => self.filtered_items.state.select_first(),
+                        'l' => self.filtered_items.state.select_last(),
+                        _ => (),
+                    }
+                }
+                KeyCode::Up => self.filtered_items.state.select_previous(),
+                KeyCode::Down => self.filtered_items.state.select_next(),
+                KeyCode::Enter => {
+                    self.exit_reason = Some(ReasonStopped::NewSources);
+                    self.textedit.clear();
+                }
+                _ => (),
+            },
         }
+    }
+
+    fn filter_choices(&mut self) {
+        let filtered = self
+            .items
+            .dirs
+            .iter()
+            .cloned()
+            .filter(|d| d.dir_without_root_string.contains(&self.textedit));
+        self.filtered_items.dirs = filtered.collect();
     }
 
     fn update_candidates(&mut self) {
@@ -879,50 +1096,12 @@ impl DirectoryState {
             self.contents.get_mut(d).unwrap().sort();
         }
 
-        let mut dir_items: Vec<DirItem> = v.into_iter().map(|d| DirItem { dir: d }).collect();
+        let mut dir_items: Vec<DirItem> = v
+            .into_iter()
+            .map(|d| DirItem::new(d, &self.root_dir))
+            .collect();
         dir_items.sort();
         self.items.dirs = dir_items;
-    }
-}
-
-fn matches_file_extensions(entry: &fs::DirEntry) -> bool {
-    entry.path().extension().is_some_and(|ext| {
-        ext.to_str()
-            .is_some_and(|ext| FILE_EXTENSIONS.contains(&ext))
-    })
-}
-
-fn find_dirs_with_music<P: AsRef<Path>>(start: P, v: &mut Vec<PathBuf>) {
-    if let Ok(mut dir) = fs::read_dir(start.as_ref()) {
-        while let Some(Ok(entry)) = dir.next() {
-            if let Ok(file_type) = entry.file_type() {
-                if file_type.is_dir() {
-                    if let Ok(mut inner_dir) = fs::read_dir(&entry.path()) {
-                        while let Some(Ok(inner_entry)) = inner_dir.next() {
-                            if let Ok(file_type) = inner_entry.file_type() {
-                                if file_type.is_dir() {
-                                    find_dirs_with_music(inner_entry.path(), v);
-                                } else if file_type.is_file() {
-                                    if matches_file_extensions(&inner_entry) {
-                                        let p = entry.path();
-                                        if !v.contains(&p) {
-                                            v.push(p);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if file_type.is_file() {
-                    if matches_file_extensions(&entry) {
-                        let p = start.as_ref().to_path_buf();
-                        if !v.contains(&p) {
-                            v.push(p);
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -934,7 +1113,22 @@ impl DirectoryState {
             .render(area, buf)
     }
 
-    fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
+    fn render_choices(&mut self, area: Rect, buf: &mut Buffer) {
+        let items: Vec<ListItem> = match self.focus {
+            DirectoryFocus::View => self
+                .items
+                .dirs
+                .iter()
+                .map(|i| ListItem::from(i.dir_without_root_string.as_str()))
+                .collect(),
+            DirectoryFocus::Textedit => self
+                .filtered_items
+                .dirs
+                .iter()
+                .map(|i| ListItem::from(i.dir_without_root_string.as_str()))
+                .collect(),
+        };
+
         let block = Block::new();
 
         let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)])
@@ -942,26 +1136,41 @@ impl DirectoryState {
             .spacing(4);
         let [left, right] = area.layout(&layout);
 
-        let items: Vec<ListItem> = self
-            .items
-            .dirs
-            .iter()
-            .map(|i| ListItem::from(i.without_root(&self.root_dir)))
-            .collect();
-
         let list = List::new(items)
             .block(block)
             .highlight_style(Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD))
             .highlight_symbol(">")
             .highlight_spacing(HighlightSpacing::Always);
 
-        StatefulWidget::render(list, left, buf, &mut self.items.state);
+        match self.focus {
+            DirectoryFocus::Textedit => {
+                let layout = Layout::vertical([Constraint::Max(1), Constraint::Fill(1)]);
+                let [top_left, bottom_left] = left.layout(&layout);
 
-        if let Some(index) = self.items.state.selected() {
-            if let Some(contents) = self.contents.get(&self.items.dirs[index].dir) {
-                let c = contents.iter().map(|d| ListItem::from(d.as_str()));
-                let list = List::new(c);
-                Widget::render(list, right, buf);
+                let line = Line::from_iter(["> ", self.textedit.as_str()]).bold();
+                line.render(top_left, buf);
+                StatefulWidget::render(list, bottom_left, buf, &mut self.filtered_items.state);
+
+                if let Some(index) = self.filtered_items.state.selected() {
+                    if let Some(contents) =
+                        self.contents.get(&self.filtered_items.dirs[index].full_dir)
+                    {
+                        let c = contents.iter().map(|d| ListItem::from(d.as_str()));
+                        let list = List::new(c);
+                        Widget::render(list, right, buf);
+                    }
+                }
+            }
+            DirectoryFocus::View => {
+                StatefulWidget::render(list, left, buf, &mut self.items.state);
+
+                if let Some(index) = self.items.state.selected() {
+                    if let Some(contents) = self.contents.get(&self.items.dirs[index].full_dir) {
+                        let c = contents.iter().map(|d| ListItem::from(d.as_str()));
+                        let list = List::new(c);
+                        Widget::render(list, right, buf);
+                    }
+                }
             }
         }
     }
@@ -973,7 +1182,8 @@ impl Widget for &mut DirectoryState {
 
         let [header_area, main_area] = area.layout(&main_layout);
         DirectoryState::render_header(header_area, buf);
-        self.render_list(main_area, buf);
+
+        self.render_choices(main_area, buf);
     }
 }
 
@@ -1020,9 +1230,17 @@ impl RootState {
             None => (Status::Waiting, CurrentState::Search),
         };
 
+        let (main_tx, main_rx): (Sender<Msg2Sub>, Receiver<Msg2Sub>) = mpsc::channel();
+
         Self {
-            songs_state: SongsState::new(sources, devices, initial_status),
-            directory_state: DirectoryState::new(&args),
+            songs_state: SongsState::new(
+                main_tx.clone(),
+                main_rx,
+                sources,
+                devices,
+                initial_status,
+            ),
+            directory_state: DirectoryState::new(main_tx, &args.root_dir),
             current_state: initial_state,
             should_quit: false,
         }
@@ -1066,6 +1284,10 @@ impl RootState {
                             None => (),
                         }
 
+                        if self.directory_state.debounce.ready() {
+                            self.directory_state.filter_choices();
+                        }
+
                         terminal
                             .draw(|frame| {
                                 frame.render_widget(&mut self.directory_state, frame.area())
@@ -1088,9 +1310,21 @@ impl RootState {
                             return Err(AppError::NoOutputDevices);
                         }
                         ReasonStopped::NewSources => {
-                            if let Some(index) = self.directory_state.items.state.selected() {
-                                let dir = &self.directory_state.items.dirs[index].dir;
-
+                            let dir = match self.directory_state.focus {
+                                DirectoryFocus::View => self
+                                    .directory_state
+                                    .items
+                                    .state
+                                    .selected()
+                                    .map(|i| &self.directory_state.items.dirs[i].full_dir),
+                                DirectoryFocus::Textedit => self
+                                    .directory_state
+                                    .filtered_items
+                                    .state
+                                    .selected()
+                                    .map(|i| &self.directory_state.filtered_items.dirs[i].full_dir),
+                            };
+                            if let Some(dir) = dir {
                                 let mut sources = Vec::with_capacity(32);
                                 if let Ok(mut read_dir) = fs::read_dir(&dir) {
                                     while let Some(Ok(entry)) = read_dir.next() {
@@ -1141,8 +1375,6 @@ fn main() -> Result<(), AppError> {
     let mut terminal = ratatui::init();
     let result = state.run(&mut terminal);
 
-    ratatui::restore();
-
     // attempt to stop audio thread
     let _ = state.songs_state.main_tx.send(Msg2Sub::ShouldExit);
 
@@ -1154,17 +1386,56 @@ fn main() -> Result<(), AppError> {
             break;
         }
         if jh.is_finished() {
-            match jh.join() {
-                Ok(_) => (),
-                Err(e) => eprintln!("{:?}", e),
-            }
+            let _ = jh.join();
             break;
         }
         attempts -= 1;
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(100));
     }
 
+    ratatui::restore();
     result
+}
+
+fn matches_file_extensions(entry: &fs::DirEntry) -> bool {
+    entry.path().extension().is_some_and(|ext| {
+        ext.to_str()
+            .is_some_and(|ext| FILE_EXTENSIONS.contains(&ext))
+    })
+}
+
+fn find_dirs_with_music<P: AsRef<Path>>(start: P, v: &mut Vec<PathBuf>) {
+    if let Ok(mut dir) = fs::read_dir(start.as_ref()) {
+        while let Some(Ok(entry)) = dir.next() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    if let Ok(mut inner_dir) = fs::read_dir(&entry.path()) {
+                        while let Some(Ok(inner_entry)) = inner_dir.next() {
+                            if let Ok(file_type) = inner_entry.file_type() {
+                                if file_type.is_dir() {
+                                    find_dirs_with_music(inner_entry.path(), v);
+                                } else if file_type.is_file() {
+                                    if matches_file_extensions(&inner_entry) {
+                                        let p = entry.path();
+                                        if !v.contains(&p) {
+                                            v.push(p);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if file_type.is_file() {
+                    if matches_file_extensions(&entry) {
+                        let p = start.as_ref().to_path_buf();
+                        if !v.contains(&p) {
+                            v.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 enum CurrentState {
@@ -1184,23 +1455,24 @@ enum Status {
     Startup,
     Paused,
     Playing,
-    Changed,
-    FinishedSong,
+    NextSong,
     Waiting,
     ShouldExit,
 }
 
 enum Msg2Main {
-    SongChanged(usize),
+    SongChanged(Option<usize>),
     Randomized(Vec<PathBuf>),
     TotalDuration(Option<Duration>),
     UpdatePosition(Option<Duration>),
     VolumeChanged(f32),
     DeviceLost,
+    DeviceLostWait,
     DeviceSwitched(Device),
     Panic(&'static str),
     PanicS(String),
     OutputStreamInitializationFailed,
+    LoopStatus(bool),
 }
 
 enum Msg2Sub {
@@ -1215,22 +1487,34 @@ enum Msg2Sub {
     MoveForward,
     MoveBackward,
     ShouldExit,
+    ToggleLoop,
     SwitchDevice(Device),
-    Devices(AvailableDevices),
+    Devices(AvailableDevices, bool),
 }
 
+/// Store absolute path,
+/// path stripped relative to root music folder for rendering,
+/// and String stripped path for filtering
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, std::hash::Hash)]
 struct DirItem {
-    dir: PathBuf,
+    full_dir: PathBuf,
+    dir_without_root: PathBuf,
+    dir_without_root_string: String,
 }
 
 impl DirItem {
-    fn without_root<P: AsRef<Path>>(&self, root: P) -> &str {
-        self.dir
+    fn new<P: AsRef<Path>>(dir: PathBuf, root: P) -> Self {
+        let without_root = dir
             .strip_prefix(root.as_ref())
-            .expect("cannot strip prefix")
-            .to_str()
-            .unwrap_or_default()
+            .expect("cannot strip prefx")
+            .to_path_buf();
+        let without_root_as_str = without_root.to_str().unwrap_or_default().to_owned();
+
+        Self {
+            full_dir: dir,
+            dir_without_root: without_root,
+            dir_without_root_string: without_root_as_str,
+        }
     }
 }
 
