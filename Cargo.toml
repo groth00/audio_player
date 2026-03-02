@@ -3,15 +3,52 @@ name = "audio_player"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# choose one of: symphonia-subset, symphonia-all
+symphonia-subset = [
+	"rodio/playback",
+	"rodio/symphonia",
+
+	"rodio/flac",
+	"rodio/mp3",
+	"rodio/mp4",
+	"rodio/symphonia-ogg",
+	"rodio/libopus",
+
+	"symphonia/flac",
+	"symphonia/aac",
+	"symphonia/alac",
+	"symphonia/mpa",
+	"symphonia/isomp4",
+	"symphonia/ogg",
+]
+
+symphonia-all = [
+	"rodio/playback",
+	"rodio/symphonia",
+	"rodio/libopus",
+
+	"symphonia/all-formats",
+	"symphonia/all-codecs"
+]
+
+# all simd features are optional
+simd-all = ["symphonia/opt-simd"]
+simd-avx = ["symphonia/opt-simd-avx"]
+simd-neon = ["symphonia/opt-simd-neon"]
+simd-sse = ["symphonia/opt-simd-sse"]
+
 [dependencies]
 crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "derive-more", "events"] }
 cpal = "0.17.3"
 ratatui = { version = "0.30.0", default-features = false, features = ["crossterm", "layout-cache", "macros", "underline-color"] }
-rodio = { path = "./rodio", default-features = false, features = ["flac", "mp3", "mp4", "symphonia", "symphonia-ogg", "libopus", "playback"] }
+rodio = { path = "./rodio", default-features = false }
 rand = "0.10.0"
 symphonia-adapter-libopus = "0.2.6"
-symphonia = { version = "0.5.5" , default-features = false, features = ["flac", "aac", "alac", "mpa", "isomp4", "ogg"] }
-# default: adpcm, flac, mkv, ogg, pcm, vorbis, wav
+symphonia = { version = "0.5.5" , default-features = false }
+
+# symphonia default: adpcm, flac, mkv, ogg, pcm, vorbis, wav
+# codecs/bundles
 # adpcm -> symphonia-codec-adpcm
 # pcm -> symphonia-codec-pcm
 # vorbis -> symphonia-codec-vorbis
@@ -23,6 +60,7 @@ symphonia = { version = "0.5.5" , default-features = false, features = ["flac", 
 # mp3 -> symphonia-bundle-mp3/mp3
 # mpa -> mp1, mp2, mp3
 
+# formats
 # isomp4 -> symphonia-format-isomp4
 # mkv -> symphonia-format-mkv
 # ogg -> symphonia-format-ogg

@@ -113,6 +113,36 @@ struct SongsState {
     message: Option<(Instant, &'static str)>,
 }
 
+#[cfg(feature = "symphonia-subset")]
+fn create_codec_registry() -> Arc<CodecRegistry> {
+    let mut codec_registry = CodecRegistry::new();
+
+    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
+    codec_registry.register_all::<OpusDecoder>();
+
+    register_enabled_codecs(&mut codec_registry);
+    Arc::new(codec_registry)
+}
+
+#[cfg(feature = "symphonia-all")]
+fn create_codec_registry() -> Arc<CodecRegistry> {
+    let mut codec_registry = CodecRegistry::new();
+    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AdpcmDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::PcmDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::VorbisDecoder>();
+    codec_registry.register_all::<OpusDecoder>();
+
+    register_enabled_codecs(&mut codec_registry);
+    Arc::new(codec_registry)
+}
+
 impl SongsState {
     fn new(
         main_tx: Sender<Msg2Sub>,
@@ -180,21 +210,12 @@ impl SongsState {
             .map_err(AppError::Sink)?;
         stream_handle.log_on_drop(false);
 
-        let mut codec_registry = CodecRegistry::new();
-        codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
-        codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
-        codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
-        codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
-        codec_registry.register_all::<OpusDecoder>();
-        register_enabled_codecs(&mut codec_registry);
-
-        let codec_registry_arc = Arc::new(codec_registry);
+        let codec_registry = create_codec_registry();
 
         let jh = thread::spawn(move || -> Result<(), AppError> {
             let stream_handle = stream_handle;
             let mixer = stream_handle.mixer();
             let sink = Player::connect_new(&mixer);
-            let codec_registry = codec_registry_arc.clone();
 
             let mut playback_state = PlaybackState::new(
                 sub_tx,
