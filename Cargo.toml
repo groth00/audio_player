@@ -32,6 +32,12 @@ symphonia-all = [
 	"symphonia/all-codecs"
 ]
 
+# for linux and BSDs, pick between pulseaudio and JACK
+# https://github.com/RustAudio/cpal/blob/master/Cargo.toml
+pulseaudio = ["cpal/pulseaudio"]
+jack = ["cpal/jack"]
+audio_thread_priority = ["cpal/audio_thread_priority"]
+
 # all simd features are optional
 simd-all = ["symphonia/opt-simd"]
 simd-avx = ["symphonia/opt-simd-avx"]

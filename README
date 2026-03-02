@@ -1,15 +1,35 @@
 --- Quickstart
-0. Install rustup
-1. Clone repository
-2. Build executable with cargo b --release
-3. Create $HOME/.aup/root_dir.txt
-	It must contain 1 line - the root path to your music folder
-	Example: mkdir ~/.aup && echo "/home/donkey_kong/Music" > ~/.aup/root_dir.txt
-4. Run the program
-	a. Symlink it for easier access
-		Example: ln -s /wherever_you_cloned_to/target/release/audio_player /convenient_location/aup
+0. 	Install rustup
+1. 	Clone repository
+2a. 	Check feature flags in Cargo.toml and build executable
+		Do you want common codecs and formats or all of them?
+		common codecs	-> symphonia-subset
+		all codecs	-> symphonia-all
 
-	b. There is 1 optional argument, the start directory, to begin playback immediately
+		Are you using Linux/BSD?
+		- cpal supports PulseAudio and JACK
+		- it also supports audio thread priority elevation
+		use features pulseaudio, jack, and audio_thread_priority
+
+		Your command could look something like:
+
+		macOS
+		cargo b --release -F symphonia-subset
+
+		Linux/BSD
+		cargo b --release -F symphonia-subset,pulseaudio,audio_thread_priority
+		OR cargo b --release -F symphonia-subset,jack,audio_thread_priority
+		OR cargo b --release -F symphonia-all,jack,audio_thread_priority
+		etc..
+
+3. 	Create $HOME/.aup/root_dir.txt
+		It must contain 1 line - the root path to your music folder
+		Example: mkdir ~/.aup && echo "/home/donkey_kong/Music" > ~/.aup/root_dir.txt
+4. 	Run the program
+		Symlink it for easier access
+		Example: ln -s /clone_location/target/release/audio_player /target_location/aup
+
+		There is 1 optional argument, the start directory (begins playback immediately)
 		Example: aup <START_DIR_ABSOLUTE_PATH>
 
 
@@ -89,69 +109,15 @@ Select directory	Enter
 
 
 --- Notes
-If you pause playback and resume after a prolonged period of time,
+If you pause playback and try to resume after a prolonged period of time,
 it is highly likely that the output stream for the output device will no longer be active.
 
-Use the keybind 'f' in song/device mode to force rebuilding the output stream for the current output device.
-Refreshing devices with 'r' and picking the same device with Enter will not work because the device is cached.
-
-Not all codecs and formats are enabled.
-If you want more codecs (adpcm, pcm, vorbis) or formats (aiff, caf, mkv, or wav) then you will need to:
-
-1. Edit Cargo.toml to add the relevant feature flags
-	Rodio feature flags (* = enabled)
-	* flac
-	* mp3
-	* mp4
-	* symphonia
-	* symphonia-ogg
-	* libopus
-	vorbis
-	wav
-
-	symphonia-adpcm
-	symphonia-aiff
-	symphonia-all
-	symphonia-caf
-	symphonia-mkv
-	symphonia-mp1
-	symphonia-mp2
-	symphonia-mp3
-	symphonia-mpa
-	claxon
-	hound
-	lewton
-	minimp3
-	wav_output
-
-	Symphonia feature flags (* = enabled)
-	all -> all-codecs, all-formats
-	all-codecs -> aac, adpcm, alac, flac, mp1, mp2, mp3, pcm, vorbis
-	all-formats -> aiff, caf, isomp4, mkv, ogg, wav
-
-	* aac -> symphonia-codec-aac
-	adpcm -> symphonia-codec-adpcm
-	* alac -> symphonia-codec-alac
-	* flac -> symphonia-bundle-flac
-	mp1 -> symphonia-bundle-mp3/mp1
-	mp2 -> symphonia-bundle-mp3/mp2
-	mp3 -> symphonia-bundle-mp3/mp3
-	* mpa -> mp1, mp2, mp3
-	pcm -> symphonia-codec-pcm
-	vorbis -> symphonia-codec-vorbis
-
-	* isomp4 -> symphonia-format-isomp4
-	* ogg -> symphonia-format-ogg
-	aiff -> symphonia-format-riff/aiff
-	caf -> symphonia-format-caf
-	mkv -> symphonia-format-mkv
-	wav -> symphonia-format-riff/wav
-
-
-2. Edit the source code
-	In the start_playback method of the SongsState struct,
-	call codec_registry.register_all() with the desired Decoder
-
-
-3. Build
-	cargo b --release
+You can try a few things:
+	1. Manually choose a new device
+		Press 'Tab' until you enter the song list view
+		Press 'l' to enter the device view
+		Press 'r' to refresh devices
+		Use j/k/Up/Down to select a device and press 'Enter'
+	2. Connect to the first available output device
+		Press 'f' in either the song list view or devices view
+Prefer method 1, as method 2 cannot enumerate output devices in a specific order
