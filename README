@@ -1,5 +1,5 @@
 --- Quickstart
-0. 	Install rustup
+0. 	Install cc, CMake, rustup, necessary sound libraries (such as asla-lib on Fedora)
 1. 	Clone repository
 2a. 	Check feature flags in Cargo.toml and build executable
 		Do you want common codecs and formats or all of them?
@@ -7,9 +7,7 @@
 		all codecs	-> symphonia-all
 
 		Are you using Linux/BSD?
-		- cpal supports PulseAudio and JACK
-		- it also supports audio thread priority elevation
-		use features pulseaudio, jack, and audio_thread_priority
+		- cpal supports JACK and audio thread priority elevation
 
 		Your command could look something like:
 
@@ -17,7 +15,7 @@
 		cargo b --release -F symphonia-subset
 
 		Linux/BSD
-		cargo b --release -F symphonia-subset,pulseaudio,audio_thread_priority
+		cargo b --release -F symphonia-subset,audio_thread_priority
 		OR cargo b --release -F symphonia-subset,jack,audio_thread_priority
 		OR cargo b --release -F symphonia-all,jack,audio_thread_priority
 		etc..
@@ -26,8 +24,8 @@
 		It must contain 1 line - the root path to your music folder
 		Example: mkdir ~/.aup && echo "/home/donkey_kong/Music" > ~/.aup/root_dir.txt
 4. 	Run the program
-		Symlink it for easier access
-		Example: ln -s /clone_location/target/release/audio_player /target_location/aup
+		Move it to your path for easier access
+		Example: mv target/release/audio_player /usr/local/bin/aup
 
 		There is 1 optional argument, the start directory (begins playback immediately)
 		Example: aup <START_DIR_ABSOLUTE_PATH>
