@@ -143,6 +143,44 @@ fn create_codec_registry() -> Arc<CodecRegistry> {
     Arc::new(codec_registry)
 }
 
+#[cfg(not(feature = "jack"))]
+fn get_devices() -> AvailableDevices {
+    let mut output_devices = Vec::with_capacity(8);
+    let host = cpal::default_host();
+
+    if let Some(default_device) = host.default_output_device() {
+        output_devices.push(default_device);
+    }
+
+    if let Ok(devices) = host.devices() {
+        for device in devices {
+            if device.supports_output() {
+                output_devices.push(device);
+            }
+        }
+    }
+    AvailableDevices::new(output_devices)
+}
+
+#[cfg(feature = "jack")]
+fn get_devices() -> AvailableDevices {
+    let mut output_devices = Vec::with_capacity(8);
+    let host = cpal::host_from_id(cpal::HostId::Jack).expect("jack host not available");
+
+    if let Some(default_device) = host.default_output_device() {
+        output_devices.push(default_device);
+    }
+
+    if let Ok(devices) = host.devices() {
+        for device in devices {
+            if device.supports_output() {
+                output_devices.push(device);
+            }
+        }
+    }
+    AvailableDevices::new(output_devices)
+}
+
 impl SongsState {
     fn new(
         main_tx: Sender<Msg2Sub>,
@@ -393,26 +431,8 @@ impl SongsState {
     }
 
     fn refresh_devices(&mut self) {
-        self.devices = SongsState::get_devices();
+        self.devices = get_devices();
         self.device_list_state = ListState::default();
-    }
-
-    fn get_devices() -> AvailableDevices {
-        let mut output_devices = Vec::with_capacity(8);
-        let host = cpal::default_host();
-
-        if let Some(default_device) = host.default_output_device() {
-            output_devices.push(default_device);
-        }
-
-        if let Ok(devices) = host.devices() {
-            for device in devices {
-                if device.supports_output() {
-                    output_devices.push(device);
-                }
-            }
-        }
-        AvailableDevices::new(output_devices)
     }
 
     fn switch_device(&self) {
@@ -424,7 +444,7 @@ impl SongsState {
     }
 
     fn send_devices(&self, start_playback: bool) -> Result<(), AppError> {
-        let available_devices = SongsState::get_devices();
+        let available_devices = get_devices();
         if available_devices.is_empty() {
             return Err(AppError::NoOutputDevices);
         }
@@ -1219,7 +1239,7 @@ impl RootState {
     fn new() -> Self {
         let args = Args::parse();
 
-        let devices = SongsState::get_devices();
+        let devices = get_devices();
         if devices.is_empty() {
             eprintln!("there are no output devices");
             std::process::exit(1);
@@ -1630,8 +1650,29 @@ impl fmt::Display for AppError {
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     fn add_01(a: f32) -> f32 {
         std::cmp::min(10, (a * 10.0) as u8 + 1) as f32 / 10.0
+    }
+
+    #[test]
+    fn enumerate_devices() {
+        let mut output_devices = Vec::with_capacity(8);
+        let host = cpal::default_host();
+
+        if let Some(default_device) = host.default_output_device() {
+            output_devices.push(default_device);
+        }
+
+        if let Ok(devices) = host.devices() {
+            for device in devices {
+                if device.supports_output() {
+                    println!("{:?}", device.description().unwrap());
+                    output_devices.push(device);
+                }
+            }
+        }
     }
 
     #[test]

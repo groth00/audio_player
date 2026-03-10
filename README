@@ -1,24 +1,39 @@
 --- Quickstart
-0. 	Install cc, CMake, rustup, necessary sound libraries (such as asla-lib on Fedora)
+0. 	Install cc, CMake, rustup, sound libraries (such as asla-lib on Fedora)
+	NOTES for Linux users:
+		This program uses cpal version 0.17.3, which currently does not support pipewire or pulseaudio directly
+		It supports ALSA and JACK (see feature flags) and uses ALSA by default
+
+		However, audio should work if you are using pipewire
+		If you are using a bluetooth device, then you should route ALSA/JACK through pipewire
+
+		For ALSA, the simplest solution I could find is to modify ~/.asoundrc
+		pcm.!default {
+			type pipewire
+		}
+
+		For JACK, you may need to install a package such as pipewire-jack or pipewire-jack-client
+		for clients to go through pipewire instead.
+		You can't use jackd at the same time.
+
 1. 	Clone repository
 2a. 	Check feature flags in Cargo.toml and build executable
 		Do you want common codecs and formats or all of them?
-		common codecs	-> symphonia-subset
-		all codecs	-> symphonia-all
+		common codecs (DEFAULT)	-> symphonia-subset
+		all codecs		-> symphonia-all
 
 		Are you using Linux/BSD?
 		- cpal supports JACK and audio thread priority elevation
 
-		Your command could look something like:
+		Run the cargo build command, which could look like:
 
 		macOS
 		cargo b --release -F symphonia-subset
 
 		Linux/BSD
-		cargo b --release -F symphonia-subset,audio_thread_priority
-		OR cargo b --release -F symphonia-subset,jack,audio_thread_priority
+		cargo b --release -F audio_thread_priority
+		OR cargo b --release -F symphonia-all,audio_thread_priority
 		OR cargo b --release -F symphonia-all,jack,audio_thread_priority
-		etc..
 
 3. 	Create $HOME/.aup/root_dir.txt
 		It must contain 1 line - the root path to your music folder
@@ -26,6 +41,9 @@
 4. 	Run the program
 		Move it to your path for easier access
 		Example: mv target/release/audio_player /usr/local/bin/aup
+
+		Clean the target directory to reclaim disk space
+		cargo clean
 
 		There is 1 optional argument, the start directory (begins playback immediately)
 		Example: aup <START_DIR_ABSOLUTE_PATH>
@@ -107,15 +125,17 @@ Select directory	Enter
 
 
 --- Notes
-If you pause playback and try to resume after a prolonged period of time,
-it is highly likely that the output stream for the output device will no longer be active.
+If you pause playback and resume after a prolonged period of time,
+the output stream for the output device will no longer be active.
 
 You can try a few things:
-	1. Manually choose a new device
+	1. Choose a new device
 		Press 'Tab' until you enter the song list view
 		Press 'l' to enter the device view
-		Press 'r' to refresh devices
 		Use j/k/Up/Down to select a device and press 'Enter'
+		If the program fails to connect to the device:
+			Press 'r' to refresh devices
+			Select a device again and press 'Enter'
 	2. Connect to the first available output device
 		Press 'f' in either the song list view or devices view
 Prefer method 1, as method 2 cannot enumerate output devices in a specific order
