@@ -14,7 +14,9 @@
 
 		For JACK, you may need to install a package such as pipewire-jack or pipewire-jack-client
 		for clients to go through pipewire instead.
-		You can't use jackd at the same time.
+
+		See PipeWire README for suggestions on how to run JACK and PipeWire
+		https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/master/README.md
 
 1. 	Clone repository
 2a. 	Check feature flags in Cargo.toml and build executable
