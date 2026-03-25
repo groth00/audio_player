@@ -1,11 +1,20 @@
 --- Quickstart
-0. 	Install cc, CMake, rustup, sound libraries (such as asla-lib on Fedora)
+0. 	Install required tools
+		cc (gcc/clang)
+		CMake
+		rustup
+		libraries for Linux
+			alsa headers (alsa-lib on Fedora, alsa-devel on Void)
+			pipewire-alsa adapter (depends on distro; might be alsa-pipewire or pipewire-alsa)
+			dbus headers
+			opus headers
+
 	NOTES for Linux users:
 		This program uses cpal version 0.17.3, which currently does not support pipewire or pulseaudio directly
 		It supports ALSA and JACK (see feature flags) and uses ALSA by default
 
 		However, audio should work if you are using pipewire
-		If you are using a bluetooth device, then you should route ALSA/JACK through pipewire
+		If you are using a bluetooth device, then you should route through pipewire
 
 		For ALSA, the simplest solution I could find is to modify ~/.asoundrc
 		pcm.!default {
@@ -18,17 +27,23 @@
 		See PipeWire README for suggestions on how to run JACK and PipeWire
 		https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/master/README.md
 
-1. 	Clone repository
-2a. 	Check feature flags in Cargo.toml and build executable
+1. 	Clone repository and initialize submodule
+		git clone https://github.com/groth00/audio_player.git
+		git submodule init
+		git submodule update
+
+2a. 	Feature flags (see Cargo.toml)
 		Do you want common codecs and formats or all of them?
-		common codecs (DEFAULT)	-> symphonia-subset
+		subset (DEFAULT)	-> symphonia-subset
 		all codecs		-> symphonia-all
 
-		Are you using Linux/BSD?
-		- cpal supports JACK and audio thread priority elevation
+		For Linux/BSD, jack and audio_thread_priority are available features
+			Depending on the OS/distribution, priority elevation may fail 
+			but it won't crash the process.
+			You can try raising the real-time priority limit via ulimit
+			https://stackoverflow.com/questions/10704983/operation-not-permitted-while-setting-new-priority-for-thread
 
-		Run the cargo build command, which could look like:
-
+2b.  	Run the cargo build command, which could look like:
 		macOS
 		cargo b --release -F symphonia-subset
 
@@ -40,6 +55,7 @@
 3. 	Create $HOME/.aup/root_dir.txt
 		It must contain 1 line - the root path to your music folder
 		Example: mkdir ~/.aup && echo "/home/donkey_kong/Music" > ~/.aup/root_dir.txt
+
 4. 	Run the program
 		Move it to your path for easier access
 		Example: mv target/release/audio_player /usr/local/bin/aup
