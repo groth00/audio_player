@@ -37,66 +37,213 @@ const LIST_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOL
 const LIST_ITEM_STYLE: Style = Style::new().bg(Color::Cyan);
 const DEVICE_ITEM_STYLE: Style = Style::new().bg(Color::LightGreen);
 
-struct PlaybackPosition {
-    total_duration: Option<Duration>,
-    current_pos: Option<Duration>,
-    volume: f32,
-    is_looping: bool,
-}
+fn main() -> Result<(), AppError> {
+    let mut state = RootState::new();
 
-impl Default for PlaybackPosition {
-    fn default() -> Self {
-        Self {
-            total_duration: None,
-            current_pos: None,
-            volume: 0.8,
-            is_looping: false,
+    let mut terminal = ratatui::init();
+    let result = state.run(&mut terminal);
+
+    // attempt to stop audio thread
+    let _ = state.songs_state.main_tx.send(Msg2Sub::ShouldExit);
+
+    // prevent blocking indefinitely if the child thread does not exit
+    let jh = state.songs_state.playback_jh;
+    let mut attempts = 4;
+    loop {
+        if attempts == 0 {
+            break;
         }
-    }
-}
-
-enum Focus {
-    Songs,
-    Devices,
-}
-
-#[derive(Clone)]
-struct AvailableDevices {
-    output_devices: Vec<Device>,
-    current_device: usize,
-    names: Vec<String>,
-}
-
-impl AvailableDevices {
-    fn new(output_devices: Vec<Device>) -> Self {
-        let names = AvailableDevices::names(&output_devices);
-
-        Self {
-            output_devices,
-            current_device: 0,
-            names,
+        if jh.is_finished() {
+            let _ = jh.join();
+            break;
         }
+        attempts -= 1;
+        thread::sleep(Duration::from_millis(100));
     }
 
-    fn is_empty(&self) -> bool {
-        self.output_devices.is_empty()
-    }
+    ratatui::restore();
+    result
+}
 
-    fn names(output_devices: &[Device]) -> Vec<String> {
-        let mut names = Vec::with_capacity(output_devices.len());
+struct RootState {
+    songs_state: SongsState,
+    directory_state: DirectoryState,
+    current_state: CurrentState,
+    should_quit: bool,
+}
 
-        for (i, d) in output_devices.iter().enumerate() {
-            if let Ok(desc) = d.description() {
-                if i == 0 {
-                    names.push("Default Device".to_owned());
-                } else {
-                    names.push(desc.name().to_owned());
+impl RootState {
+    fn new() -> Self {
+        let args = Args::parse();
+
+        let devices = get_devices();
+        if devices.is_empty() {
+            eprintln!("there are no output devices");
+            std::process::exit(1);
+        }
+
+        let mut sources = Vec::with_capacity(32);
+        let (initial_status, initial_state) = match &args.dir {
+            Some(dir) => {
+                if let Ok(mut read_dir) = fs::read_dir(&dir) {
+                    while let Some(Ok(entry)) = read_dir.next() {
+                        if entry.path().extension().is_some_and(|ext| {
+                            FILE_EXTENSIONS.contains(&ext.to_string_lossy().as_ref())
+                        }) {
+                            sources.push(MediaSource {
+                                path: entry.path(),
+                                is_playing: false,
+                            });
+                        }
+                    }
                 }
-            } else {
-                names.push("Unknown".into());
+                if sources.is_empty() {
+                    eprintln!("there's nothing to play");
+                    std::process::exit(1);
+                }
+                sources.sort();
+                sources[0].is_playing = true;
+                (Status::Startup, CurrentState::Songs)
+            }
+            None => (Status::Waiting, CurrentState::Search),
+        };
+
+        let (main_tx, main_rx): (Sender<Msg2Sub>, Receiver<Msg2Sub>) = mpsc::channel();
+
+        Self {
+            songs_state: SongsState::new(
+                main_tx.clone(),
+                main_rx,
+                sources,
+                devices,
+                initial_status,
+            ),
+            directory_state: DirectoryState::new(main_tx, &args.root_dir),
+            current_state: initial_state,
+            should_quit: false,
+        }
+    }
+
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), AppError> {
+        while !self.should_quit {
+            match self.current_state {
+                CurrentState::Songs => {
+                    let exit_reason = loop {
+                        match self.songs_state.exit_reason.take() {
+                            Some(reason) => break reason,
+                            None => (),
+                        }
+
+                        self.songs_state.read_channel();
+
+                        terminal
+                            .draw(|frame| frame.render_widget(&mut self.songs_state, frame.area()))
+                            .map_err(|_e| AppError::DrawFrame)?;
+
+                        if event::poll(Duration::from_millis(100)).map_err(AppError::Io)? {
+                            if let Some(key) =
+                                event::read().map_err(AppError::Io)?.as_key_press_event()
+                            {
+                                self.songs_state.handle_key(key);
+                            }
+                        }
+                    };
+
+                    match exit_reason {
+                        ReasonStopped::ChangeScreen => self.current_state = CurrentState::Search,
+                        ReasonStopped::Quit => self.should_quit = true,
+                        _ => unreachable!(),
+                    }
+                }
+                CurrentState::Search => {
+                    let exit_reason = loop {
+                        match self.directory_state.exit_reason.take() {
+                            Some(reason) => break reason,
+                            None => (),
+                        }
+
+                        if self.directory_state.debounce.ready() {
+                            self.directory_state.filter_choices();
+                        }
+
+                        terminal
+                            .draw(|frame| {
+                                frame.render_widget(&mut self.directory_state, frame.area())
+                            })
+                            .map_err(|_e| AppError::DrawFrame)?;
+
+                        if event::poll(Duration::from_millis(100)).map_err(AppError::Io)? {
+                            if let Some(key) =
+                                event::read().map_err(AppError::Io)?.as_key_press_event()
+                            {
+                                self.directory_state.handle_key(key);
+                            }
+                        }
+                    };
+
+                    match exit_reason {
+                        ReasonStopped::ChangeScreen => self.current_state = CurrentState::Songs,
+                        ReasonStopped::Quit => self.should_quit = true,
+                        ReasonStopped::NoOutputDevices => {
+                            return Err(AppError::NoOutputDevices);
+                        }
+                        ReasonStopped::NewSources => {
+                            let dir = match self.directory_state.focus {
+                                DirectoryFocus::View => self
+                                    .directory_state
+                                    .items
+                                    .state
+                                    .selected()
+                                    .map(|i| &self.directory_state.items.dirs[i].full_dir),
+                                DirectoryFocus::Textedit => self
+                                    .directory_state
+                                    .filtered_items
+                                    .state
+                                    .selected()
+                                    .map(|i| &self.directory_state.filtered_items.dirs[i].full_dir),
+                            };
+                            if let Some(dir) = dir {
+                                let mut sources = Vec::with_capacity(32);
+                                if let Ok(mut read_dir) = fs::read_dir(&dir) {
+                                    while let Some(Ok(entry)) = read_dir.next() {
+                                        if matches_file_extensions(&entry) {
+                                            sources.push(MediaSource {
+                                                path: entry.path(),
+                                                is_playing: false,
+                                            });
+                                        }
+                                    }
+                                }
+                                assert!(!sources.is_empty());
+                                sources.sort();
+                                sources[0].is_playing = true;
+
+                                let new_paths = sources.iter().map(|s| s.path.clone()).collect();
+                                let new_media_sources = MediaSources {
+                                    sources,
+                                    state: ListState::default(),
+                                };
+                                self.songs_state.media = new_media_sources;
+
+                                let _ = self
+                                    .songs_state
+                                    .main_tx
+                                    .send(Msg2Sub::NewSources(new_paths));
+                                // Drain the channel when switching sources
+                                // After each song, Msg2Main::SongChanged is sent to the main thread
+                                // There is a time window where which we change sources,
+                                // setting the song index to 0 but the message remains in the channel,
+                                // which is processed when going back to CurrentState::Songs,
+                                // causing the terminal styling to be incorrect
+                                for _ in self.songs_state.sub_rx.try_iter() {}
+                                self.current_state = CurrentState::Songs;
+                            }
+                        }
+                    }
+                }
             }
         }
-        names
+        Ok(())
     }
 }
 
@@ -111,74 +258,6 @@ struct SongsState {
     focus: Focus,
     exit_reason: Option<ReasonStopped>,
     message: Option<(Instant, &'static str)>,
-}
-
-#[cfg(feature = "symphonia-subset")]
-fn create_codec_registry() -> Arc<CodecRegistry> {
-    let mut codec_registry = CodecRegistry::new();
-
-    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
-    codec_registry.register_all::<OpusDecoder>();
-
-    register_enabled_codecs(&mut codec_registry);
-    Arc::new(codec_registry)
-}
-
-#[cfg(feature = "symphonia-all")]
-fn create_codec_registry() -> Arc<CodecRegistry> {
-    let mut codec_registry = CodecRegistry::new();
-    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::AdpcmDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::PcmDecoder>();
-    codec_registry.register_all::<symphonia::default::codecs::VorbisDecoder>();
-    codec_registry.register_all::<OpusDecoder>();
-
-    register_enabled_codecs(&mut codec_registry);
-    Arc::new(codec_registry)
-}
-
-#[cfg(not(feature = "jack"))]
-fn get_devices() -> AvailableDevices {
-    let mut output_devices = Vec::with_capacity(8);
-    let host = cpal::default_host();
-
-    if let Some(default_device) = host.default_output_device() {
-        output_devices.push(default_device);
-    }
-
-    if let Ok(devices) = host.devices() {
-        for device in devices {
-            if device.supports_output() {
-                output_devices.push(device);
-            }
-        }
-    }
-    AvailableDevices::new(output_devices)
-}
-
-#[cfg(feature = "jack")]
-fn get_devices() -> AvailableDevices {
-    let mut output_devices = Vec::with_capacity(8);
-    let host = cpal::host_from_id(cpal::HostId::Jack).expect("jack host not available");
-
-    if let Some(default_device) = host.default_output_device() {
-        output_devices.push(default_device);
-    }
-
-    if let Ok(devices) = host.devices() {
-        for device in devices {
-            if device.supports_output() {
-                output_devices.push(device);
-            }
-        }
-    }
-    AvailableDevices::new(output_devices)
 }
 
 impl SongsState {
@@ -948,60 +1027,6 @@ impl PlaybackState {
     }
 }
 
-fn build_stream(device: Device, tx: Sender<Msg2Main>) -> Result<MixerDeviceSink, AppError> {
-    let mut stream = DeviceSinkBuilder::from_device(device)
-        .map_err(AppError::Sink)?
-        .with_error_callback(move |err: cpal::StreamError| match err {
-            cpal::StreamError::DeviceNotAvailable => {
-                let _ = tx.send(Msg2Main::DeviceLost);
-            }
-            _ => {
-                let _ = tx.send(Msg2Main::PanicS(err.to_string()));
-                panic!("{}", err);
-            }
-        })
-        .open_sink_or_fallback()
-        .map_err(AppError::Sink)?;
-    stream.log_on_drop(false);
-
-    Ok(stream)
-}
-
-#[derive(Default, PartialEq, Eq)]
-enum DirectoryFocus {
-    #[default]
-    View,
-    Textedit,
-}
-
-struct Debounce {
-    last_trigger: Option<Instant>,
-    delay: Duration,
-}
-
-impl Debounce {
-    fn trigger(&mut self) {
-        self.last_trigger = Some(Instant::now());
-    }
-
-    fn ready(&self) -> bool {
-        if let Some(ts) = self.last_trigger {
-            Instant::now() - ts > self.delay
-        } else {
-            false
-        }
-    }
-}
-
-impl Default for Debounce {
-    fn default() -> Self {
-        Self {
-            last_trigger: None,
-            delay: Duration::from_millis(100),
-        }
-    }
-}
-
 struct DirectoryState {
     main_tx: Sender<Msg2Sub>,
     root_dir: String,
@@ -1228,214 +1253,192 @@ impl Widget for &mut DirectoryState {
     }
 }
 
-struct RootState {
-    songs_state: SongsState,
-    directory_state: DirectoryState,
-    current_state: CurrentState,
-    should_quit: bool,
+struct PlaybackPosition {
+    total_duration: Option<Duration>,
+    current_pos: Option<Duration>,
+    volume: f32,
+    is_looping: bool,
 }
 
-impl RootState {
-    fn new() -> Self {
-        let args = Args::parse();
-
-        let devices = get_devices();
-        if devices.is_empty() {
-            eprintln!("there are no output devices");
-            std::process::exit(1);
+impl Default for PlaybackPosition {
+    fn default() -> Self {
+        Self {
+            total_duration: None,
+            current_pos: None,
+            volume: 0.5,
+            is_looping: false,
         }
+    }
+}
 
-        let mut sources = Vec::with_capacity(32);
-        let (initial_status, initial_state) = match &args.dir {
-            Some(dir) => {
-                if let Ok(mut read_dir) = fs::read_dir(&dir) {
-                    while let Some(Ok(entry)) = read_dir.next() {
-                        if entry.path().extension().is_some_and(|ext| {
-                            FILE_EXTENSIONS.contains(&ext.to_string_lossy().as_ref())
-                        }) {
-                            sources.push(MediaSource {
-                                path: entry.path(),
-                                is_playing: false,
-                            });
-                        }
-                    }
-                }
-                if sources.is_empty() {
-                    eprintln!("there's nothing to play");
-                    std::process::exit(1);
-                }
-                sources.sort();
-                sources[0].is_playing = true;
-                (Status::Startup, CurrentState::Songs)
-            }
-            None => (Status::Waiting, CurrentState::Search),
-        };
+#[derive(Clone)]
+struct AvailableDevices {
+    output_devices: Vec<Device>,
+    current_device: usize,
+    names: Vec<String>,
+}
 
-        let (main_tx, main_rx): (Sender<Msg2Sub>, Receiver<Msg2Sub>) = mpsc::channel();
+impl AvailableDevices {
+    fn new(output_devices: Vec<Device>) -> Self {
+        let names = AvailableDevices::names(&output_devices);
 
         Self {
-            songs_state: SongsState::new(
-                main_tx.clone(),
-                main_rx,
-                sources,
-                devices,
-                initial_status,
-            ),
-            directory_state: DirectoryState::new(main_tx, &args.root_dir),
-            current_state: initial_state,
-            should_quit: false,
+            output_devices,
+            current_device: 0,
+            names,
         }
     }
 
-    fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), AppError> {
-        while !self.should_quit {
-            match self.current_state {
-                CurrentState::Songs => {
-                    let exit_reason = loop {
-                        match self.songs_state.exit_reason.take() {
-                            Some(reason) => break reason,
-                            None => (),
-                        }
+    fn is_empty(&self) -> bool {
+        self.output_devices.is_empty()
+    }
 
-                        self.songs_state.read_channel();
+    fn names(output_devices: &[Device]) -> Vec<String> {
+        let mut names = Vec::with_capacity(output_devices.len());
 
-                        terminal
-                            .draw(|frame| frame.render_widget(&mut self.songs_state, frame.area()))
-                            .map_err(|_e| AppError::DrawFrame)?;
-
-                        if event::poll(Duration::from_millis(100)).map_err(AppError::Io)? {
-                            if let Some(key) =
-                                event::read().map_err(AppError::Io)?.as_key_press_event()
-                            {
-                                self.songs_state.handle_key(key);
-                            }
-                        }
-                    };
-
-                    match exit_reason {
-                        ReasonStopped::ChangeScreen => self.current_state = CurrentState::Search,
-                        ReasonStopped::Quit => self.should_quit = true,
-                        _ => unreachable!(),
-                    }
+        for (i, d) in output_devices.iter().enumerate() {
+            if let Ok(desc) = d.description() {
+                if i == 0 {
+                    names.push("Default Device".to_owned());
+                } else {
+                    names.push(desc.name().to_owned());
                 }
-                CurrentState::Search => {
-                    let exit_reason = loop {
-                        match self.directory_state.exit_reason.take() {
-                            Some(reason) => break reason,
-                            None => (),
-                        }
-
-                        if self.directory_state.debounce.ready() {
-                            self.directory_state.filter_choices();
-                        }
-
-                        terminal
-                            .draw(|frame| {
-                                frame.render_widget(&mut self.directory_state, frame.area())
-                            })
-                            .map_err(|_e| AppError::DrawFrame)?;
-
-                        if event::poll(Duration::from_millis(100)).map_err(AppError::Io)? {
-                            if let Some(key) =
-                                event::read().map_err(AppError::Io)?.as_key_press_event()
-                            {
-                                self.directory_state.handle_key(key);
-                            }
-                        }
-                    };
-
-                    match exit_reason {
-                        ReasonStopped::ChangeScreen => self.current_state = CurrentState::Songs,
-                        ReasonStopped::Quit => self.should_quit = true,
-                        ReasonStopped::NoOutputDevices => {
-                            return Err(AppError::NoOutputDevices);
-                        }
-                        ReasonStopped::NewSources => {
-                            let dir = match self.directory_state.focus {
-                                DirectoryFocus::View => self
-                                    .directory_state
-                                    .items
-                                    .state
-                                    .selected()
-                                    .map(|i| &self.directory_state.items.dirs[i].full_dir),
-                                DirectoryFocus::Textedit => self
-                                    .directory_state
-                                    .filtered_items
-                                    .state
-                                    .selected()
-                                    .map(|i| &self.directory_state.filtered_items.dirs[i].full_dir),
-                            };
-                            if let Some(dir) = dir {
-                                let mut sources = Vec::with_capacity(32);
-                                if let Ok(mut read_dir) = fs::read_dir(&dir) {
-                                    while let Some(Ok(entry)) = read_dir.next() {
-                                        if matches_file_extensions(&entry) {
-                                            sources.push(MediaSource {
-                                                path: entry.path(),
-                                                is_playing: false,
-                                            });
-                                        }
-                                    }
-                                }
-                                assert!(!sources.is_empty());
-                                sources.sort();
-                                sources[0].is_playing = true;
-
-                                let new_paths = sources.iter().map(|s| s.path.clone()).collect();
-                                let new_media_sources = MediaSources {
-                                    sources,
-                                    state: ListState::default(),
-                                };
-                                self.songs_state.media = new_media_sources;
-
-                                let _ = self
-                                    .songs_state
-                                    .main_tx
-                                    .send(Msg2Sub::NewSources(new_paths));
-                                // Drain the channel when switching sources
-                                // After each song, Msg2Main::SongChanged is sent to the main thread
-                                // There is a time window where which we change sources,
-                                // setting the song index to 0 but the message remains in the channel,
-                                // which is processed when going back to CurrentState::Songs,
-                                // causing the terminal styling to be incorrect
-                                for _ in self.songs_state.sub_rx.try_iter() {}
-                                self.current_state = CurrentState::Songs;
-                            }
-                        }
-                    }
-                }
+            } else {
+                names.push("Unknown".into());
             }
         }
-        Ok(())
+        names
     }
 }
 
-fn main() -> Result<(), AppError> {
-    let mut state = RootState::new();
+#[cfg(feature = "symphonia-subset")]
+fn create_codec_registry() -> Arc<CodecRegistry> {
+    let mut codec_registry = CodecRegistry::new();
 
-    let mut terminal = ratatui::init();
-    let result = state.run(&mut terminal);
+    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
+    codec_registry.register_all::<OpusDecoder>();
 
-    // attempt to stop audio thread
-    let _ = state.songs_state.main_tx.send(Msg2Sub::ShouldExit);
+    register_enabled_codecs(&mut codec_registry);
+    Arc::new(codec_registry)
+}
 
-    // prevent blocking indefinitely if the child thread does not exit
-    let jh = state.songs_state.playback_jh;
-    let mut attempts = 4;
-    loop {
-        if attempts == 0 {
-            break;
-        }
-        if jh.is_finished() {
-            let _ = jh.join();
-            break;
-        }
-        attempts -= 1;
-        thread::sleep(Duration::from_millis(100));
+#[cfg(feature = "symphonia-all")]
+fn create_codec_registry() -> Arc<CodecRegistry> {
+    let mut codec_registry = CodecRegistry::new();
+    codec_registry.register_all::<symphonia::default::codecs::AacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AdpcmDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::AlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::FlacDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::MpaDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::PcmDecoder>();
+    codec_registry.register_all::<symphonia::default::codecs::VorbisDecoder>();
+    codec_registry.register_all::<OpusDecoder>();
+
+    register_enabled_codecs(&mut codec_registry);
+    Arc::new(codec_registry)
+}
+
+#[cfg(not(feature = "jack"))]
+fn get_devices() -> AvailableDevices {
+    let mut output_devices = Vec::with_capacity(32);
+    let host = cpal::default_host();
+
+    if let Some(default_device) = host.default_output_device() {
+        output_devices.push(default_device);
     }
 
-    ratatui::restore();
-    result
+    if let Ok(devices) = host.devices() {
+        for device in devices {
+            if device.supports_output()
+                && device
+                    .description()
+                    .is_ok_and(|d| d.driver() != Some("null"))
+            {
+                output_devices.push(device);
+            }
+        }
+    }
+    AvailableDevices::new(output_devices)
+}
+
+#[cfg(feature = "jack")]
+fn get_devices() -> AvailableDevices {
+    let mut output_devices = Vec::with_capacity(32);
+    let host = cpal::host_from_id(cpal::HostId::Jack).expect("jack host not available");
+
+    if let Some(default_device) = host.default_output_device() {
+        output_devices.push(default_device);
+    }
+
+    if let Ok(devices) = host.devices() {
+        for device in devices {
+            if device.supports_output()
+                && device
+                    .description()
+                    .is_ok_and(|d| d.driver() != Some("null"))
+            {
+                output_devices.push(device);
+            }
+        }
+    }
+    AvailableDevices::new(output_devices)
+}
+
+fn build_stream(device: Device, tx: Sender<Msg2Main>) -> Result<MixerDeviceSink, AppError> {
+    let mut stream = DeviceSinkBuilder::from_device(device)
+        .map_err(AppError::Sink)?
+        .with_error_callback(move |err: cpal::StreamError| match err {
+            cpal::StreamError::DeviceNotAvailable => {
+                let _ = tx.send(Msg2Main::DeviceLost);
+            }
+            _ => {
+                let _ = tx.send(Msg2Main::PanicS(err.to_string()));
+                panic!("{}", err);
+            }
+        })
+        .open_sink_or_fallback()
+        .map_err(AppError::Sink)?;
+    stream.log_on_drop(false);
+
+    Ok(stream)
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum DirectoryFocus {
+    #[default]
+    View,
+    Textedit,
+}
+
+struct Debounce {
+    last_trigger: Option<Instant>,
+    delay: Duration,
+}
+
+impl Debounce {
+    fn trigger(&mut self) {
+        self.last_trigger = Some(Instant::now());
+    }
+
+    fn ready(&self) -> bool {
+        if let Some(ts) = self.last_trigger {
+            Instant::now() - ts > self.delay
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for Debounce {
+    fn default() -> Self {
+        Self {
+            last_trigger: None,
+            delay: Duration::from_millis(100),
+        }
+    }
 }
 
 fn matches_file_extensions(entry: &fs::DirEntry) -> bool {
@@ -1477,6 +1480,12 @@ fn find_dirs_with_music<P: AsRef<Path>>(start: P, v: &mut Vec<PathBuf>) {
             }
         }
     }
+}
+
+/// While in playback screen
+enum Focus {
+    Songs,
+    Devices,
 }
 
 enum CurrentState {
@@ -1533,13 +1542,12 @@ enum Msg2Sub {
     Devices(AvailableDevices, bool),
 }
 
-/// Store absolute path,
-/// path stripped relative to root music folder for rendering,
-/// and String stripped path for filtering
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, std::hash::Hash)]
 struct DirItem {
     full_dir: PathBuf,
+    // for display
     dir_without_root: PathBuf,
+    // for filtering
     dir_without_root_string: String,
 }
 
@@ -1673,17 +1681,6 @@ mod test {
                 }
             }
         }
-    }
-
-    #[test]
-    fn sort_stuff() {
-        let v = vec![
-            "celeste",
-            "dk_country/restored",
-            "psyqui",
-            "psyqui/your_voice_so",
-        ];
-        assert!(v.is_sorted());
     }
 
     #[test]
