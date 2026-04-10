@@ -667,7 +667,7 @@ impl PlaybackState {
             codec_registry,
             index: 0,
             sources,
-            volume: 0.8,
+            volume: 0.5,
             position: None,
             last_position_update: Instant::now(),
             last_device_healthcheck: Instant::now(),
@@ -805,6 +805,7 @@ impl PlaybackState {
     }
 
     fn run(&mut self) -> Result<(), AppError> {
+        self.sink.set_volume(self.volume);
         loop {
             match self.status {
                 Status::Startup => {
